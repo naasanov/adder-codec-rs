@@ -46,6 +46,10 @@ pub struct EventCube {
     skip_cube: bool,
 
     decompressed_event_queue: VecDeque<Event>,
+
+    delta_t_history: [DeltaT; 3],
+
+    history_count: u8,
 }
 
 impl EventCube {
@@ -74,9 +78,56 @@ impl EventCube {
             raw_event_memory: [[[EventCoordless::default(); BLOCK_SIZE]; BLOCK_SIZE]; 3],
             skip_cube: true,
             decompressed_event_queue: Default::default(),
+            delta_t_history: [0; 3],
+            history_count: 0,
         }
     }
 }
+
+fn predict_delta_t(&self, mut d_residual: DResidual) -> DeltaT {
+    if self.history_count == 0{
+        return if d_residual < 0 {
+            self.last_delta_t >> -d_residual
+        } else {
+            self.last_delta_t << d_residual
+        };
+    }
+
+    match self.history_count {
+        1 => {
+            self.delta_t_history[0]
+        }
+        2 => {
+            let dt1 = self.delta_t_history[0] as i64;
+            let dt2 = self.delta_t_history[1] as i64;
+            let predicted = 2 * dt1 - dt2;
+            predicted.max(0) as DeltaT
+        }
+        3 => {
+            let dt1 = self.delta_t_history[0] as f64;
+            let dt2 = self.delta_t_history[1] as f64;
+            let dt3 = self.delta_t_history[2] as f64;
+            let predicted = 0.2 * dt1 + 0.3 * dt2 + 0.5 * dt3; // Weighted moving average
+            predicted as DeltaT
+        }
+        _ => {
+            panic!("Invalid history count");
+    }
+}
+
+fn update_delta_t_history(&mut self, new_delta_t: DeltaT) {
+    if self.history_count < 3 {
+        self.delta_t_history[self.history_count as usize] = new_delta_t;
+        self.history_count += 1;
+    } else {
+        self.delta_t_history[0] = self.delta_t_history[1];
+        self.delta_t_history[1] = self.delta_t_history[2];
+        self.delta_t_history[2] = new_delta_t;
+    }
+
+    self.last_delta_t = new_delta_t;
+}
+
 
 fn generate_t_prediction(
     idx: usize,
