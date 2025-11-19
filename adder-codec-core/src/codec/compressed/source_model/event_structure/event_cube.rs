@@ -18,6 +18,51 @@ type Pixel = Vec<EventCoordless>;
 
 type EventLists = [[[Pixel; BLOCK_SIZE]; BLOCK_SIZE]; 3];
 
+// Predict a delta_t from a copied history (no borrows on `self`).
+fn predict_delta_from_history(
+    history: [DeltaT; 3],
+    history_count: u8,
+    last_delta_t: DeltaT,
+    d_residual: DResidual,
+) -> DeltaT {
+    let mut dr = d_residual;
+    if dr.abs() > 14 {
+        dr = 0;
+    }
+
+    if history_count == 0 {
+        return if dr < 0 {
+            last_delta_t >> -dr
+        } else {
+            last_delta_t << dr
+        };
+    }
+
+    match history_count {
+        1 => history[0],
+        2 => {
+            let dt1 = history[0] as i64;
+            let dt2 = history[1] as i64;
+            let predicted = 2 * dt1 - dt2;
+            predicted.max(0) as DeltaT
+        }
+        3 => {
+            let dt1 = history[0] as f64;
+            let dt2 = history[1] as f64;
+            let dt3 = history[2] as f64;
+            let predicted = 0.2 * dt1 + 0.3 * dt2 + 0.5 * dt3; // Weighted moving average
+            predicted as DeltaT
+        }
+        _ => {
+            if dr < 0 {
+                last_delta_t >> -dr
+            } else {
+                last_delta_t << dr
+            }
+        }
+    }
+}
+
 #[derive(PartialEq, Debug, Clone, Default)]
 pub struct EventCube {
     /// The absolute y-coordinate of the top-left pixel in the cube
@@ -47,9 +92,11 @@ pub struct EventCube {
 
     decompressed_event_queue: VecDeque<Event>,
 
-    delta_t_history: [DeltaT; 3],
+    delta_t_history: [DeltaT; 3], // Change 3 to some n value later for n-order prediction
 
     history_count: u8,
+    
+    last_delta_t: DeltaT,
 }
 
 impl EventCube {
@@ -80,88 +127,27 @@ impl EventCube {
             decompressed_event_queue: Default::default(),
             delta_t_history: [0; 3],
             history_count: 0,
+            last_delta_t: 0,
         }
-    }
-}
 
-fn predict_delta_t(&self, mut d_residual: DResidual) -> DeltaT {
-    if self.history_count == 0{
-        return if d_residual < 0 {
-            self.last_delta_t >> -d_residual
+    }
+
+    /// Update the delta-t history buffer with the newly observed delta_t
+    pub fn update_delta_t_history(&mut self, new_delta_t: DeltaT) {
+        if self.history_count < 3 {
+            self.delta_t_history[self.history_count as usize] = new_delta_t;
+            self.history_count += 1;
         } else {
-            self.last_delta_t << d_residual
-        };
-    }
+            self.delta_t_history[0] = self.delta_t_history[1];
+            self.delta_t_history[1] = self.delta_t_history[2];
+            self.delta_t_history[2] = new_delta_t;
+        }
 
-    match self.history_count {
-        1 => {
-            self.delta_t_history[0]
-        }
-        2 => {
-            let dt1 = self.delta_t_history[0] as i64;
-            let dt2 = self.delta_t_history[1] as i64;
-            let predicted = 2 * dt1 - dt2;
-            predicted.max(0) as DeltaT
-        }
-        3 => {
-            let dt1 = self.delta_t_history[0] as f64;
-            let dt2 = self.delta_t_history[1] as f64;
-            let dt3 = self.delta_t_history[2] as f64;
-            let predicted = 0.2 * dt1 + 0.3 * dt2 + 0.5 * dt3; // Weighted moving average
-            predicted as DeltaT
-        }
-        _ => {
-            panic!("Invalid history count");
+        self.last_delta_t = new_delta_t;
     }
 }
 
-fn update_delta_t_history(&mut self, new_delta_t: DeltaT) {
-    if self.history_count < 3 {
-        self.delta_t_history[self.history_count as usize] = new_delta_t;
-        self.history_count += 1;
-    } else {
-        self.delta_t_history[0] = self.delta_t_history[1];
-        self.delta_t_history[1] = self.delta_t_history[2];
-        self.delta_t_history[2] = new_delta_t;
-    }
 
-    self.last_delta_t = new_delta_t;
-}
-
-
-fn generate_t_prediction(
-    idx: usize,
-    mut d_residual: DResidual,
-    last_delta_t: DeltaT,
-    prev_event: &EventCoordless,
-    num_intervals: usize,
-    dt_ref: DeltaT,
-    start_t: AbsoluteT,
-) -> AbsoluteT {
-    if idx == 1 {
-        // We don't have a deltaT context
-        start_t + last_delta_t as AbsoluteT
-    } else {
-        if d_residual.abs() > 14 {
-            d_residual = 0;
-        }
-        if prev_event.d == D_EMPTY {
-            d_residual = -1;
-        }
-        // We've gotten the DeltaT between the last two events. Use that
-        // to form our prediction
-        let delta_t_prediction: DeltaT = if d_residual < 0 {
-            last_delta_t >> -d_residual
-        } else {
-            last_delta_t << d_residual
-        };
-        max(
-            prev_event.t,
-            prev_event.t
-                + min(delta_t_prediction, (num_intervals as u8) as u32 * dt_ref) as AbsoluteT,
-        )
-    }
-}
 
 impl HandleEvent for EventCube {
     /// Take in a raw event and place it at the appropriate location.
@@ -479,11 +465,14 @@ impl ComponentCompression for EventCube {
         }
         let c_thresh_max = c_thresh_max.unwrap_or(7);
         for c in 0..self.num_channels {
-            self.raw_event_lists[c].iter_mut().for_each(|row| {
-                row.iter_mut().for_each(|pixel| {
+            // collect per-pixel last-delta updates and apply after mutably borrowing raw_event_lists
+            let mut updates: Vec<DeltaT> = Vec::new();
+            for row in self.raw_event_lists[c].iter_mut() {
+                for pixel in row.iter_mut() {
                     if !pixel.is_empty() {
                         let mut idx = 1;
-                        let mut last_delta_t: DeltaT = 0;
+                        // start per-pixel delta history with the cube's last value
+                        let mut last_delta_t: DeltaT = self.last_delta_t;
                         loop {
                             encoder.model.set_context(contexts.d_context);
 
@@ -499,14 +488,18 @@ impl ComponentCompression for EventCube {
                                     encoder.encode(Some(&(*byte as usize)), stream).unwrap();
                                 }
 
-                                let t_prediction = generate_t_prediction(
-                                    idx,
-                                    d_residual,
+                                // compute prediction using copied cube history
+                                let delta_t_prediction = predict_delta_from_history(
+                                    self.delta_t_history,
+                                    self.history_count,
                                     last_delta_t,
-                                    &prev_event,
-                                    self.num_intervals,
-                                    self.dt_ref,
-                                    self.start_t,
+                                    d_residual,
+                                );
+
+                                let t_prediction = max(
+                                    prev_event.t,
+                                    prev_event.t
+                                        + min(delta_t_prediction, (self.num_intervals as u8) as u32 * self.dt_ref) as AbsoluteT,
                                 );
 
                                 // encoder.model.set_context(contexts.dtref_context);
@@ -560,9 +553,17 @@ impl ComponentCompression for EventCube {
                             }
                             idx += 1;
                         }
+
+                        // record the last observed delta for this pixel; apply after loop
+                        updates.push(last_delta_t);
                     }
-                })
-            })
+                }
+            }
+
+            // apply collected updates to cube-level history now that mutable borrows ended
+            for &v in updates.iter() {
+                self.update_delta_t_history(v);
+            }
         }
         Ok(())
     }
@@ -663,12 +664,13 @@ impl ComponentCompression for EventCube {
         let mut bitshift_buffer = [0u8; 1];
 
         for c in 0..self.num_channels {
-            self.raw_event_lists[c].iter_mut().for_each(|row| {
-                row.iter_mut().for_each(|pixel| {
+            let mut updates: Vec<DeltaT> = Vec::new();
+            for row in self.raw_event_lists[c].iter_mut() {
+                for pixel in row.iter_mut() {
                     if !pixel.is_empty() {
                         // Then look for the next events for this pixel
                         let mut idx = 1;
-                        let mut last_delta_t = 0;
+                        let mut last_delta_t = self.last_delta_t;
                         loop {
                             decoder.model.set_context(contexts.d_context);
 
@@ -685,14 +687,18 @@ impl ComponentCompression for EventCube {
 
                             let d = (prev_event.d as DResidual + d_residual) as D;
 
-                            let t_prediction = generate_t_prediction(
-                                idx,
-                                d_residual,
+                            // compute prediction using copied cube history
+                            let delta_t_prediction = predict_delta_from_history(
+                                self.delta_t_history,
+                                self.history_count,
                                 last_delta_t,
-                                &prev_event,
-                                self.num_intervals,
-                                self.dt_ref,
-                                self.start_t,
+                                d_residual,
+                            );
+
+                            let t_prediction = max(
+                                prev_event.t,
+                                prev_event.t
+                                    + min(delta_t_prediction, (self.num_intervals as u8) as u32 * self.dt_ref) as AbsoluteT,
                             );
 
                             decoder.model.set_context(contexts.bitshift_context);
@@ -728,9 +734,15 @@ impl ComponentCompression for EventCube {
 
                             idx += 1;
                         }
+
+                        updates.push(last_delta_t);
                     }
-                });
-            });
+                }
+            }
+
+            for &v in updates.iter() {
+                self.update_delta_t_history(v);
+            }
         }
     }
 }
