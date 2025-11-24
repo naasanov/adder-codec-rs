@@ -1,5 +1,6 @@
 extern crate adder_codec_core;
 
+use adder_codec_core::codec::compressed::source_model::entropy_analysis::EntropyAnalyzer;
 use adder_codec_core::codec::compressed::stream::CompressedOutput;
 use adder_codec_core::codec::encoder::Encoder;
 
@@ -75,6 +76,72 @@ fn test_build_many_frames() -> Result<(), Box<dyn Error>> {
     let compressed = writer.into_inner()?;
     dbg!(compressed.len());
     assert!((compressed.len() as u32) < event_count * stream.meta().event_size as u32);
+
+    Ok(())
+}
+
+/// Analyze the entropy distribution of events in the sample file to evaluate
+/// potential compression gains from context switching.
+#[test]
+fn test_entropy_analysis() -> Result<(), Box<dyn Error>> {
+    // Open the virat_small_gray.adder sample file
+    let (mut stream, mut bitreader) = open_file_decoder("tests/samples/virat_small_gray.adder")?;
+
+    // Create the entropy analyzer with the reference interval from the file
+    let mut analyzer = EntropyAnalyzer::new(stream.meta().ref_interval);
+
+    let mut event_count: u64 = 0;
+    loop {
+        let res = stream.digest_event(&mut bitreader);
+        match res {
+            Ok(event) => {
+                analyzer.process_event(&event);
+                event_count += 1;
+            }
+            Err(CodecError::IoError(_e)) => {
+                break;
+            }
+            Err(e) => return Err(Box::new(e)),
+        }
+    }
+
+    // Generate and print the report
+    let report = analyzer.generate_report();
+    println!("\n{}", report);
+
+    // Basic sanity checks
+    assert_eq!(report.total_events, event_count);
+    assert!(report.global_d_entropy > 0.0, "D entropy should be positive");
+
+    // Print summary recommendations
+    println!("\n=== RECOMMENDATIONS ===");
+
+    let best_d_savings = report.d_by_trend_potential_savings
+        .max(report.d_by_magnitude_potential_savings)
+        .max(report.d_by_density_potential_savings);
+
+    if best_d_savings > 5.0 {
+        println!("D context switching looks promising! Best potential: {:.2}% reduction", best_d_savings);
+        if report.d_by_trend_potential_savings == best_d_savings {
+            println!("  -> Recommended approach: Switch context by D trend (rising/falling/stable)");
+        } else if report.d_by_magnitude_potential_savings == best_d_savings {
+            println!("  -> Recommended approach: Switch context by previous D magnitude");
+        } else {
+            println!("  -> Recommended approach: Switch context by pixel event density");
+        }
+    } else if best_d_savings > 2.0 {
+        println!("D context switching may provide modest gains (~{:.2}%)", best_d_savings);
+    } else {
+        println!("D context switching unlikely to help significantly ({:.2}%)", best_d_savings);
+        println!("The current single-context approach may already be near optimal for this data.");
+    }
+
+    let best_t_savings = report.t_by_magnitude_potential_savings
+        .max(report.t_by_trend_potential_savings);
+
+    if best_t_savings > 5.0 {
+        println!("\nT context switching looks promising! Best potential: {:.2}% reduction", best_t_savings);
+    }
 
     Ok(())
 }

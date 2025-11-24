@@ -1,5 +1,6 @@
 pub mod fenwick;
-mod source_model;
+/// Source model for compression (contexts, event structures, etc.)
+pub mod source_model;
 /// Compressed codec
 pub mod stream;
 

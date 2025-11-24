@@ -45,6 +45,7 @@ trait ComponentCompression {
     ) -> Result<(), CodecError>;
 }
 pub mod cabac_contexts;
+pub mod entropy_analysis;
 pub mod event_structure;
 
 // fn predict_t_from_d_residual(reference_t: AbsoluteT, d_residual: i16, dt_ref: DeltaT) -> AbsoluteT {
