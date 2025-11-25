@@ -8,6 +8,7 @@ use adder_codec_core::open_file_decoder;
 use std::error::Error;
 use std::io::BufWriter;
 
+
 #[test]
 fn test_read_adder_raw() -> Result<(), Box<dyn Error>> {
     // Open the virat_small_gray.adder sample file as a RawInput
@@ -125,7 +126,7 @@ fn test_compression_ratio() -> Result<(), Box<dyn Error>> {
     println!("Original file size:        {} bytes", original_file_size);
     println!("Event count:               {}", event_count);
     println!("Event size (raw):          {} bytes", stream.meta().event_size);
-    println!("Raw event stream size:     {} bytes ({} events × {} bytes)",
+    println!("Raw event stream size:     {} bytes ({} events x {} bytes)",
              raw_event_bytes, event_count, stream.meta().event_size);
     println!("Compressed size:           {} bytes", compressed_size);
     println!("\n=== PERFORMANCE METRICS ===");

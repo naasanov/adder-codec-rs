@@ -17,6 +17,9 @@ pub struct Contexts {
     pub(crate) eof_context: usize,
 
     pub(crate) bitshift_context: usize,
+
+    /// Run-lengths of no-event context
+    pub(crate) no_event_run_length_context: usize,
 }
 
 pub const D_RESIDUAL_OFFSET: i16 = 255;
@@ -36,12 +39,16 @@ impl Contexts {
         let bitshift_context =
             source_model.push_context_with_weights(Weights::new_with_counts(16, &[1; 16]));
 
+        let no_event_run_length_context =
+            source_model.push_context_with_weights(no_event_runlength_weights());
+
         Self {
             d_context,
             t_context,
             t_residual_max,
             eof_context,
             bitshift_context,
+            no_event_run_length_context,
         }
     }
 
@@ -222,6 +229,33 @@ pub fn d_residual_default_weights() -> Weights {
     }
 
     Weights::new_with_counts(counts.len(), &Vec::from(counts))
+}
+
+pub fn no_event_runlength_weights() -> Weights {
+    // Run length can be [0, BLOCK_SIZE * BLOCK_SIZE] = [0, 256]
+    // Most runs will be short, so bias toward smaller values
+    let mut counts = vec![1u64; 257];
+
+    for i in 0..50 {
+        counts[i] = 100; // 0-49: very likely
+    }
+    for i in 50..100 {
+        counts[i] = 10; // 50-99: less likely
+    }
+    for i in 100..150 {
+        counts[i] = 6; // 100-149: less likely
+    }
+    for i in 150..200 {
+        counts[i] = 5; // 150-199: less likely
+    }
+    for i in 200..250 {
+        counts[i] = 3; // 200-249: rare
+    }
+    for i in 250..256 {
+        counts[i] = 1; // 250-255: very rare
+    }
+
+    Weights::new_with_counts(counts.len(), &counts)
 }
 
 pub fn eof_context(
