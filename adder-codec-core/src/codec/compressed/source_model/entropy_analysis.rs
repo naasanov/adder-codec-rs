@@ -4,7 +4,7 @@
 //! and T residuals across different scenarios, helping quantify potential compression
 //! gains from context switching.
 
-use crate::{AbsoluteT, DeltaT, Event, EventCoordless, D};
+use crate::{DeltaT, Event, EventCoordless, D};
 use std::collections::HashMap;
 
 /// Statistics for a single context/scenario

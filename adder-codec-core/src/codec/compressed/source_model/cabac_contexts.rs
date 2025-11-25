@@ -1,12 +1,16 @@
 use crate::codec::compressed::fenwick::context_switching::FenwickModel;
 use crate::codec::compressed::fenwick::Weights;
+use crate::codec::compressed::{DRESIDUAL_NO_EVENT, DResidual};
 use crate::{AbsoluteT, DeltaT, EventCoordless, Intensity, D, D_SHIFT};
 use arithmetic_coding_adder_dep::Encoder;
 use bitstream_io::{BigEndian, BitWrite, BitWriter};
 
 pub struct Contexts {
     /// Decimation factor residuals context
-    pub(crate) d_context: usize,
+    pub(crate) d_initial_context: usize,
+    pub(crate) d_stable_context: usize, // Stable also stores NO_EVENT
+    pub(crate) d_inc_context: usize,
+    pub(crate) d_dec_context: usize,
 
     /// Timestamp residuals context
     pub(crate) t_context: usize,
@@ -25,7 +29,11 @@ pub const BITSHIFT_ENCODE_FULL: u8 = 15;
 
 impl Contexts {
     pub fn new(source_model: &mut FenwickModel, dt_ref: DeltaT) -> Self {
-        let d_context = source_model.push_context_with_weights(d_residual_default_weights());
+        let d_initial_context =
+            source_model.push_context_with_weights(d_residual_default_weights());
+        let d_stable_context = source_model.push_context_with_weights(d_residual_default_weights());
+        let d_inc_context = source_model.push_context_with_weights(d_residual_default_weights());
+        let d_dec_context = source_model.push_context_with_weights(d_residual_default_weights());
 
         // TODO: Configure this based on the delta_t_max parameter!!
         let t_weights = t_residual_default_weights(dt_ref);
@@ -37,7 +45,10 @@ impl Contexts {
             source_model.push_context_with_weights(Weights::new_with_counts(16, &[1; 16]));
 
         Self {
-            d_context,
+            d_initial_context,
+            d_stable_context,
+            d_inc_context,
+            d_dec_context,
             t_context,
             t_residual_max,
             eof_context,
@@ -131,6 +142,17 @@ impl Contexts {
                 // JUST LOSSLESS
                 (BITSHIFT_ENCODE_FULL, t_residual_i64)
             }
+        }
+    }
+
+    /// Get the D residual context based on the trend of previous D residuals, defaulting to stable
+    pub(crate) fn d_trend_context(&self, last_d_residual: Option<DResidual>) -> usize {
+        const THRESHOLD: DResidual = 3;
+        match last_d_residual {
+            Some(d) if d == DRESIDUAL_NO_EVENT => self.d_stable_context,
+            Some(d) if d > THRESHOLD => self.d_inc_context,
+            Some(d) if d < -THRESHOLD => self.d_dec_context,
+            _ => self.d_stable_context,
         }
     }
 }
