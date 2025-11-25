@@ -4,6 +4,14 @@ use crate::codec::compressed::{DRESIDUAL_NO_EVENT, DResidual};
 use crate::{AbsoluteT, DeltaT, EventCoordless, Intensity, D, D_SHIFT};
 use arithmetic_coding_adder_dep::Encoder;
 use bitstream_io::{BigEndian, BitWrite, BitWriter};
+use std::sync::atomic::AtomicU64;
+
+// Global context usage statistics across all ADUs
+pub(crate) static GLOBAL_D_INITIAL_COUNT: AtomicU64 = AtomicU64::new(0);
+pub(crate) static GLOBAL_D_STABLE_COUNT: AtomicU64 = AtomicU64::new(0);
+pub(crate) static GLOBAL_D_INC_COUNT: AtomicU64 = AtomicU64::new(0);
+pub(crate) static GLOBAL_D_DEC_COUNT: AtomicU64 = AtomicU64::new(0);
+pub(crate) static GLOBAL_D_NO_EVENT_COUNT: AtomicU64 = AtomicU64::new(0);
 
 pub struct Contexts {
     /// Decimation factor residuals context
@@ -21,6 +29,13 @@ pub struct Contexts {
     pub(crate) eof_context: usize,
 
     pub(crate) bitshift_context: usize,
+
+    // Context usage tracking
+    pub d_initial_count: std::sync::atomic::AtomicU64,
+    pub d_stable_count: std::sync::atomic::AtomicU64,
+    pub d_inc_count: std::sync::atomic::AtomicU64,
+    pub d_dec_count: std::sync::atomic::AtomicU64,
+    pub d_no_event_count: std::sync::atomic::AtomicU64,
 }
 
 pub const D_RESIDUAL_OFFSET: i16 = 255;
@@ -53,6 +68,11 @@ impl Contexts {
             t_residual_max,
             eof_context,
             bitshift_context,
+            d_initial_count: std::sync::atomic::AtomicU64::new(0),
+            d_stable_count: std::sync::atomic::AtomicU64::new(0),
+            d_inc_count: std::sync::atomic::AtomicU64::new(0),
+            d_dec_count: std::sync::atomic::AtomicU64::new(0),
+            d_no_event_count: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -147,15 +167,85 @@ impl Contexts {
 
     /// Get the D residual context based on the trend of previous D residuals, defaulting to stable
     pub(crate) fn d_trend_context(&self, last_d_residual: Option<DResidual>) -> usize {
-        const THRESHOLD: DResidual = 3;
+        const THRESHOLD: DResidual = 10;
         match last_d_residual {
-            Some(d) if d == DRESIDUAL_NO_EVENT => self.d_stable_context,
-            Some(d) if d > THRESHOLD => self.d_inc_context,
-            Some(d) if d < -THRESHOLD => self.d_dec_context,
-            _ => self.d_stable_context,
+            Some(d) if d == DRESIDUAL_NO_EVENT => {
+                // Track both local and global
+                self.d_stable_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                GLOBAL_D_STABLE_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.d_stable_context
+            }
+            Some(d) if d > THRESHOLD => {
+                self.d_inc_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                GLOBAL_D_INC_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.d_inc_context
+            }
+            Some(d) if d < -THRESHOLD => {
+                self.d_dec_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                GLOBAL_D_DEC_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.d_dec_context
+            }
+            _ => {
+                self.d_stable_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                GLOBAL_D_STABLE_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.d_stable_context
+            }
+        }
+    }
+
+    /// Print context usage statistics for this ADU
+    pub fn print_context_stats(&self) {
+        let initial = self.d_initial_count.load(std::sync::atomic::Ordering::Relaxed);
+        let stable = self.d_stable_count.load(std::sync::atomic::Ordering::Relaxed);
+        let inc = self.d_inc_count.load(std::sync::atomic::Ordering::Relaxed);
+        let dec = self.d_dec_count.load(std::sync::atomic::Ordering::Relaxed);
+        let total = initial + stable + inc + dec;
+
+        if total > 0 {
+            println!("\n=== D CONTEXT USAGE (This ADU) ===");
+            println!("d_initial_context: {:6} ({:5.2}%)", initial, initial as f64 / total as f64 * 100.0);
+            println!("d_stable_context:  {:6} ({:5.2}%)", stable, stable as f64 / total as f64 * 100.0);
+            println!("d_inc_context:     {:6} ({:5.2}%)", inc, inc as f64 / total as f64 * 100.0);
+            println!("d_dec_context:     {:6} ({:5.2}%)", dec, dec as f64 / total as f64 * 100.0);
+            println!("Total D symbols:   {}", total);
+            println!("===================================\n");
         }
     }
 }
+
+/// Reset global context usage statistics
+pub fn reset_global_context_stats() {
+    GLOBAL_D_INITIAL_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
+    GLOBAL_D_STABLE_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
+    GLOBAL_D_INC_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
+    GLOBAL_D_DEC_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
+    GLOBAL_D_NO_EVENT_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Print global context usage statistics across all ADUs
+pub fn print_global_context_stats() {
+    let initial = GLOBAL_D_INITIAL_COUNT.load(std::sync::atomic::Ordering::Relaxed);
+    let stable = GLOBAL_D_STABLE_COUNT.load(std::sync::atomic::Ordering::Relaxed);
+    let inc = GLOBAL_D_INC_COUNT.load(std::sync::atomic::Ordering::Relaxed);
+    let dec = GLOBAL_D_DEC_COUNT.load(std::sync::atomic::Ordering::Relaxed);
+    let no_event = GLOBAL_D_NO_EVENT_COUNT.load(std::sync::atomic::Ordering::Relaxed);
+    let total = initial + stable + inc + dec;
+
+    if total > 0 {
+        println!("\n=== D CONTEXT USAGE (ALL ADUs) ===");
+        println!("d_initial_context: {:6} ({:5.2}%)", initial, initial as f64 / total as f64 * 100.0);
+        println!("d_stable_context:  {:6} ({:5.2}%) [includes NO_EVENT]", stable, stable as f64 / total as f64 * 100.0);
+        println!("  └─ NO_EVENT:     {:6} ({:5.2}% of stable, {:5.2}% of total)",
+                 no_event,
+                 if stable > 0 { no_event as f64 / stable as f64 * 100.0 } else { 0.0 },
+                 no_event as f64 / total as f64 * 100.0);
+        println!("d_inc_context:     {:6} ({:5.2}%)", inc, inc as f64 / total as f64 * 100.0);
+        println!("d_dec_context:     {:6} ({:5.2}%)", dec, dec as f64 / total as f64 * 100.0);
+        println!("Total D symbols:   {}", total);
+        println!("===================================\n");
+    }
+}
+
 
 pub fn t_residual_default_weights(_dt_ref: DeltaT) -> Weights {
     // t residuals can fit within i16

@@ -148,13 +148,17 @@ fn test_entropy_analysis() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn test_compression_ratio() -> Result<(), Box<dyn Error>> {
+    // Reset global context stats at the start
+    adder_codec_core::codec::compressed::source_model::cabac_contexts::reset_global_context_stats();
+
+    let file_path: &str = "tests/samples/virat_small_gray.adder";
+
     // Open the virat_small_gray.adder sample file as a RawInput
-    let (mut stream, mut bitreader) = open_file_decoder("tests/samples/virat_small_gray.adder")?;
+    let (mut stream, mut bitreader) = open_file_decoder(file_path)?;
     stream.meta_mut().adu_interval =
         (stream.meta().delta_t_max / stream.meta().ref_interval) as usize;
 
-    let original_file_size = std::fs::metadata("tests/samples/virat_small_gray.adder")?.len();
-
+    let original_file_size = std::fs::metadata(file_path)?.len();
     // Create the compressed encoder
     let bufwriter = BufWriter::new(vec![]);
     let compression = CompressedOutput::new(*stream.meta(), bufwriter);
@@ -177,6 +181,10 @@ fn test_compression_ratio() -> Result<(), Box<dyn Error>> {
     }
 
     encoder.flush_writer()?;
+
+    // Print global context usage statistics for the entire video
+    adder_codec_core::codec::compressed::source_model::cabac_contexts::print_global_context_stats();
+
     let writer = encoder.close_writer()?.unwrap();
     let compressed = writer.into_inner()?;
     let compressed_size = compressed.len() as u64;

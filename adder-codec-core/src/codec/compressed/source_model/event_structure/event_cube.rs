@@ -339,10 +339,10 @@ impl ComponentCompression for EventCube {
                             d_residual = event.d as DResidual - init.d as DResidual;
 
                             let context_idx = contexts.d_trend_context(last_d_residual);
-                            println!(
-                                "ENCODE pixel, d_residual={}, last_d_residual={:?}, context={}",
-                                d_residual, last_d_residual, context_idx
-                            );
+                            // println!(
+                            //     "ENCODE pixel, d_residual={}, last_d_residual={:?}, context={}",
+                            //     d_residual, last_d_residual, context_idx
+                            // );
 
                             encoder.model.set_context(context_idx);
 
@@ -355,10 +355,12 @@ impl ComponentCompression for EventCube {
                             last_d_residual = Some(d_residual);
                         } else {
                             // Write the first event's D directly
-                            println!(
-                                "ENCODE pixel, first pixel, using d_initial_context={}",
-                                contexts.d_initial_context
-                            );
+                            // println!(
+                            //     "ENCODE pixel, first pixel, using d_initial_context={}",
+                            //     contexts.d_initial_context
+                            // );
+                            contexts.d_initial_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            crate::codec::compressed::source_model::cabac_contexts::GLOBAL_D_INITIAL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             encoder.model.set_context(contexts.d_initial_context);
                             let tmp = (event.d as DResidual + D_RESIDUAL_OFFSET) as usize;
                             encoder.encode(Some(&tmp), stream).unwrap();
@@ -417,11 +419,19 @@ impl ComponentCompression for EventCube {
                         }
                     } else {
                         // Else there's no event for this pixel. Encode a NO_EVENT symbol.
-                        print!(
-                            "ENCODE pixel, no event, using d_stable_context={}\n",
-                            contexts.d_stable_context
-                        );
-                        encoder.model.set_context(contexts.d_stable_context);
+                        // print!(
+                        //     "ENCODE pixel, no event, using d_stable_context={}\n",
+                        //     contexts.d_stable_context
+                        // );
+                        contexts.d_no_event_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        
+                        let context = match init_event {
+                            Some(_) => contexts.d_trend_context(last_d_residual),
+                            None => {
+                                crate::codec::compressed::source_model::cabac_contexts::GLOBAL_D_NO_EVENT_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                contexts.d_initial_context},
+                        };
+                        encoder.model.set_context(context);
                         let tmp = (DRESIDUAL_NO_EVENT + D_RESIDUAL_OFFSET) as usize;
                         encoder.encode(Some(&tmp), stream).unwrap();
                         // for byte in (DRESIDUAL_NO_EVENT).to_be_bytes().iter() {
@@ -524,6 +534,8 @@ impl ComponentCompression for EventCube {
                                 last_delta_t = (event.t - prev_event.t) as DeltaT;
                             } else {
                                 // Else there's no other event for this pixel. Encode a NO_EVENT symbol.
+                                contexts.d_no_event_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
                                 encoder.model.set_context(contexts.d_stable_context);
                                 for byte in (DRESIDUAL_NO_EVENT).to_be_bytes().iter() {
                                     encoder.encode(Some(&(*byte as usize)), stream).unwrap();
@@ -557,30 +569,21 @@ impl ComponentCompression for EventCube {
             for y in 0..BLOCK_SIZE {
                 for x in 0..BLOCK_SIZE {
                     let pixel = &mut self.raw_event_lists[c][y][x];
-
-                    if let Some(last_d) = last_d_residual {
-                        decoder.model.set_context(contexts.d_stable_context);
-                        println!(
-                            "DECODE pixel, d_residual={}, last_d_residual={:?}, context={}",
-                            last_d,
-                            last_d_residual,
-                            contexts.d_trend_context(last_d_residual)
-                        );
-                    } else if init_event.is_none() {
-                        println!(
-                            "DECODE pixel, first pixel, using d_initial_context={}",
-                            contexts.d_initial_context
-                        );
+                    if init_event.is_none() {
+                        // println!(
+                        //     "DECODE pixel, first pixel, using d_initial_context={}",
+                        //     contexts.d_initial_context
+                        // );
                         decoder.model.set_context(contexts.d_initial_context);
                     } else {
                         decoder
                             .model
                             .set_context(contexts.d_trend_context(last_d_residual));
-                        println!(
-                            "DECODE pixel, d_residual=?, last_d_residual={:?}, context={}",
-                            last_d_residual,
-                            contexts.d_trend_context(last_d_residual)
-                        );
+                        // println!(
+                        //     "DECODE pixel, d_residual=?, last_d_residual={:?}, context={}",
+                        //     last_d_residual,
+                        //     contexts.d_trend_context(last_d_residual)
+                        // );
                     }
 
                     let tmp = decoder.decode(stream).unwrap().unwrap();
