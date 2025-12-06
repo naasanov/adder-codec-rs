@@ -7,7 +7,9 @@ use bitstream_io::{BigEndian, BitWrite, BitWriter};
 pub struct Contexts {
     /// Decimation factor residuals context
     pub(crate) d_context: usize,
-
+    pub(crate) d_context_increasing: usize,
+    pub(crate) d_context_decreasing: usize,
+    pub(crate) d_context_stable: usize,
     /// Timestamp residuals context
     pub(crate) t_context: usize,
 
@@ -26,7 +28,15 @@ pub const BITSHIFT_ENCODE_FULL: u8 = 15;
 impl Contexts {
     pub fn new(source_model: &mut FenwickModel, dt_ref: DeltaT) -> Self {
         let d_context = source_model.push_context_with_weights(d_residual_default_weights());
-
+        let d_context_increasing = source_model.push_context_with_weights(
+            d_residual_increasing_weights()
+        );
+        let d_context_decreasing = source_model.push_context_with_weights(
+            d_residual_decreasing_weights()
+        );
+        let d_context_stable = source_model.push_context_with_weights(
+            d_residual_stable_weights()
+        );
         // TODO: Configure this based on the delta_t_max parameter!!
         let t_weights = t_residual_default_weights(dt_ref);
         let t_residual_max = (t_weights.len() as i64 - 2) / 2;
@@ -38,6 +48,9 @@ impl Contexts {
 
         Self {
             d_context,
+            d_context_increasing,
+            d_context_decreasing,
+            d_context_stable,
             t_context,
             t_residual_max,
             eof_context,
@@ -131,6 +144,87 @@ impl Contexts {
                 // JUST LOSSLESS
                 (BITSHIFT_ENCODE_FULL, t_residual_i64)
             }
+        }
+    }
+}
+pub fn d_residual_increasing_weights() -> Weights {
+    let mut counts: [u64; 513] = [1; 513];
+    
+    // When D is increasing, positive residuals are MORE likely
+    // Boost [0, 40] range (indices 255-295)
+    for idx in 255..=295 {
+        counts[idx] = 30;
+    }
+    
+    // Still allow negative but lower probability
+    for idx in 235..=254 {
+        counts[idx] = 5;
+    }
+    
+    // NO_EVENT and SKIP_CUBE
+    counts[511] = 20;
+    counts[512] = 10;
+    
+    Weights::new_with_counts(counts.len(), &Vec::from(counts))
+}
+
+/// Weights optimized for when D is decreasing (prev_d_residual < 0)
+pub fn d_residual_decreasing_weights() -> Weights {
+    let mut counts: [u64; 513] = [1; 513];
+    
+    // When D is decreasing, negative residuals are MORE likely
+    // Boost [-40, 0] range (indices 215-254)
+    for idx in 215..=254 {
+        counts[idx] = 30;
+    }
+    
+    // Still allow positive but lower probability
+    for idx in 256..=275 {
+        counts[idx] = 5;
+    }
+    
+    // NO_EVENT and SKIP_CUBE
+    counts[511] = 20;
+    counts[512] = 10;
+    
+    Weights::new_with_counts(counts.len(), &Vec::from(counts))
+}
+
+/// Weights optimized for when D is stable (prev_d_residual == 0)
+pub fn d_residual_stable_weights() -> Weights {
+    let mut counts: [u64; 513] = [1; 513];
+    
+    // When D is stable, residuals cluster near 0
+    // Heavy boost for [-10, 10] range (indices 245-265)
+    for idx in 245..=265 {
+        counts[idx] = 50;
+    }
+    
+    // Medium boost for [-20, 20]
+    for idx in 235..=244 {
+        counts[idx] = 15;
+    }
+    for idx in 266..=275 {
+        counts[idx] = 15;
+    }
+    
+    // NO_EVENT and SKIP_CUBE
+    counts[511] = 25;  // Higher - stable means fewer events
+    counts[512] = 10;
+    
+    Weights::new_with_counts(counts.len(), &Vec::from(counts))
+}
+
+/// Helper: Select appropriate D context based on previous trend
+impl Contexts {
+    #[inline]
+    pub fn select_d_context(&self, prev_d_residual: i16) -> usize {
+        if prev_d_residual > 0 {
+            self.d_context_increasing
+        } else if prev_d_residual < 0 {
+            self.d_context_decreasing
+        } else {
+            self.d_context_stable
         }
     }
 }

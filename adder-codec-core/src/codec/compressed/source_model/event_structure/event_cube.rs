@@ -25,39 +25,59 @@ fn predict_delta_from_history(
     last_delta_t: DeltaT,
     d_residual: DResidual,
 ) -> DeltaT {
-    let mut dr = d_residual;
-    if dr.abs() > 14 {
-        dr = 0;
-    }
-
-    if history_count == 0 {
-        return if dr < 0 {
-            last_delta_t >> -dr
-        } else {
-            last_delta_t << dr
-        };
-    }
-
+    let d_factor = if d_residual == 0{
+        1.0
+    } else if d_residual.abs() > 14 {
+        0.0
+    } else{
+        1.0 - (d_residual.abs() as f64 / 14.0) * 0.5
+    };
     match history_count {
-        1 => history[0],
+        0 => {
+            if d_residual < 0 {
+                last_delta_t >> (-d_residual).min(16)
+            } else {
+                let shifted = (last_delta_t as u64) << d_residual.min(16);
+                shifted.min(u32::MAX as u64) as DeltaT
+            }
+        }
+        1 => {
+            let base = history[0] as f64;
+            (base * d_factor).max(1.0) as DeltaT
+        }
         2 => {
-            let dt1 = history[0] as i64;
-            let dt2 = history[1] as i64;
-            let predicted = 2 * dt1 - dt2;
-            predicted.max(0) as DeltaT
+            let dt1 = history[0] as f64;
+            let dt2 = history[1] as f64;
+            let extrapolated = 2.0 * dt1 - dt2;
+            let predicted = extrapolated * d_factor + dt1 * (1.0 - d_factor);
+            predicted.max(1.0) as DeltaT
         }
         3 => {
             let dt1 = history[0] as f64;
             let dt2 = history[1] as f64;
             let dt3 = history[2] as f64;
-            let predicted = 0.2 * dt1 + 0.3 * dt2 + 0.5 * dt3; // Weighted moving average
-            predicted as DeltaT
+
+            let mean = (dt1 + dt2 + dt3) / 3.0;
+            let variance = ((dt1 - mean).powi(2) + (dt2 - mean).powi(2) + (dt3 - mean).powi(2)) / 3.0;
+
+            let predicted = if variance < mean * mean * 0.01 {
+                mean // If low variance, just use the mean0
+            } else {
+                let accel = (dt1 as i64 - dt2 as i64) - (dt2 as i64 - dt3 as i64);
+                if accel.abs() < (mean * 0.1) as i64 {
+                    2.0 * dt1 - dt2
+                } else {
+                    0.5 * dt1 + 0.3 * dt2 + 0.2 * dt3 // Weighted moving average
+                }
+            };
+            (predicted * d_factor).max(1.0) as DeltaT
         }
         _ => {
-            if dr < 0 {
-                last_delta_t >> -dr
+            if d_residual < 0 {
+                last_delta_t >> (-d_residual).min(16)
             } else {
-                last_delta_t << dr
+                let shifted = (last_delta_t as u64) << d_residual.min(16);
+                shifted.min(u32::MAX as u64) as DeltaT
             }
         }
     }
@@ -134,13 +154,20 @@ impl EventCube {
 
     /// Update the delta-t history buffer with the newly observed delta_t
     pub fn update_delta_t_history(&mut self, new_delta_t: DeltaT) {
+        // Store newest value at index 0 so that predictor functions
+        // which expect history[0] to be the most recent value behave correctly.
         if self.history_count < 3 {
-            self.delta_t_history[self.history_count as usize] = new_delta_t;
+            // shift existing entries to the right and insert new at index 0
+            for i in (1..=self.history_count as usize).rev() {
+                self.delta_t_history[i] = self.delta_t_history[i - 1];
+            }
+            self.delta_t_history[0] = new_delta_t;
             self.history_count += 1;
         } else {
-            self.delta_t_history[0] = self.delta_t_history[1];
-            self.delta_t_history[1] = self.delta_t_history[2];
-            self.delta_t_history[2] = new_delta_t;
+            // rotate right: drop oldest (index 2), move [0]->[1], [1]->[2], insert new at [0]
+            self.delta_t_history[2] = self.delta_t_history[1];
+            self.delta_t_history[1] = self.delta_t_history[0];
+            self.delta_t_history[0] = new_delta_t;
         }
 
         self.last_delta_t = new_delta_t;
@@ -473,9 +500,8 @@ impl ComponentCompression for EventCube {
                         let mut idx = 1;
                         // start per-pixel delta history with the cube's last value
                         let mut last_delta_t: DeltaT = self.last_delta_t;
+                        let mut prev_d_residual: DResidual = 0;
                         loop {
-                            encoder.model.set_context(contexts.d_context);
-
                             if idx < pixel.len() {
                                 // TODO: don't copy the below event?
                                 let prev_event = pixel[idx - 1]; // We can assume for now that this is perfectly decoded, but later we'll corrupt it according to any loss we incur
@@ -483,6 +509,13 @@ impl ComponentCompression for EventCube {
 
                                 // Get the D residual
                                 let d_residual = event.d as DResidual - prev_event.d as DResidual;
+                                let d_ctx = if idx == 1 {
+                                    contexts.d_context
+                                } else {
+                                    contexts.select_d_context(prev_d_residual)
+                                };
+                                encoder.model.set_context(d_ctx);
+                                
                                 // Write the D residual (relative to the start_d for the first event)
                                 for byte in d_residual.to_be_bytes().iter() {
                                     encoder.encode(Some(&(*byte as usize)), stream).unwrap();
@@ -542,6 +575,7 @@ impl ComponentCompression for EventCube {
                                 event.t = max(event.t, prev_event.t);
                                 debug_assert!(event.t >= prev_event.t);
                                 last_delta_t = (event.t - prev_event.t) as DeltaT;
+                                prev_d_residual = d_residual;
                             } else {
                                 encoder.model.set_context(contexts.d_context);
                                 // Else there's no other event for this pixel. Encode a NO_EVENT symbol.
@@ -561,8 +595,10 @@ impl ComponentCompression for EventCube {
             }
 
             // apply collected updates to cube-level history now that mutable borrows ended
-            for &v in updates.iter() {
-                self.update_delta_t_history(v);
+            if !updates.is_empty(){
+                updates.sort_unstable();
+                let median_delta = updates[updates.len() / 2];
+                self.update_delta_t_history(median_delta);
             }
         }
         Ok(())
@@ -671,9 +707,14 @@ impl ComponentCompression for EventCube {
                         // Then look for the next events for this pixel
                         let mut idx = 1;
                         let mut last_delta_t = self.last_delta_t;
+                        let mut prev_d_residual: DResidual = 0;
                         loop {
-                            decoder.model.set_context(contexts.d_context);
-
+                            let d_ctx = if idx == 1 {
+                                contexts.d_context
+                            } else {
+                                contexts.select_d_context(prev_d_residual)
+                            };
+                            decoder.model.set_context(d_ctx);
                             for byte in d_residual_buffer.iter_mut() {
                                 *byte = decoder.decode(stream).unwrap().unwrap() as u8;
                             }
@@ -727,6 +768,7 @@ impl ComponentCompression for EventCube {
                             );
                             debug_assert!(t >= prev_event.t);
                             last_delta_t = (t - prev_event.t) as DeltaT;
+                            prev_d_residual = d_residual;
                             // debug_assert!(
                             //     t <= self.start_t + self.num_intervals as AbsoluteT * self.dt_ref
                             // );
@@ -740,8 +782,10 @@ impl ComponentCompression for EventCube {
                 }
             }
 
-            for &v in updates.iter() {
-                self.update_delta_t_history(v);
+            if !updates.is_empty(){
+                updates.sort_unstable();
+                let median_delta = updates[updates.len() / 2];
+                self.update_delta_t_history(median_delta);
             }
         }
     }
