@@ -24,6 +24,12 @@ fn compression_benchmark() -> Result<(), Box<dyn Error>> {
     let mut results: Vec<(&str, u64, u64)> = vec![];
 
     for file in files.iter() {
+        // Skip missing sample files so the benchmark can run on available data.
+        if !Path::new(file).exists() {
+            eprintln!("Skipping missing sample file: {}", file);
+            continue;
+        }
+
         let (mut stream, mut bitreader) = open_file_decoder(file)?;
         println!("{}", file);
         stream.meta_mut().adu_interval =
