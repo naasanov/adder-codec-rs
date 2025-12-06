@@ -1,3 +1,4 @@
+use crate::codec::compressed::{DRESIDUAL_NO_EVENT, DResidual};
 use crate::codec::compressed::fenwick::context_switching::FenwickModel;
 use crate::codec::compressed::fenwick::Weights;
 use crate::{AbsoluteT, DeltaT, EventCoordless, Intensity, D, D_SHIFT};
@@ -5,8 +6,10 @@ use arithmetic_coding_adder_dep::Encoder;
 use bitstream_io::{BigEndian, BitWrite, BitWriter};
 
 pub struct Contexts {
-    /// Decimation factor residuals context
-    pub(crate) d_context: usize,
+    pub(crate) d_initial_context: usize,
+    pub(crate) d_stable_context: usize,
+    pub(crate) d_inc_context: usize,
+    pub(crate) d_dec_context: usize,
 
     /// Timestamp residuals context
     pub(crate) t_context: usize,
@@ -28,7 +31,11 @@ pub const BITSHIFT_ENCODE_FULL: u8 = 15;
 
 impl Contexts {
     pub fn new(source_model: &mut FenwickModel, dt_ref: DeltaT) -> Self {
-        let d_context = source_model.push_context_with_weights(d_residual_default_weights());
+        let d_initial_context =
+            source_model.push_context_with_weights(d_residual_default_weights());
+        let d_stable_context = source_model.push_context_with_weights(d_residual_stable_weights());
+        let d_inc_context = source_model.push_context_with_weights(d_residual_inc_weights());
+        let d_dec_context = source_model.push_context_with_weights(d_residual_dec_weights());
 
         // TODO: Configure this based on the delta_t_max parameter!!
         let t_weights = t_residual_default_weights(dt_ref);
@@ -43,12 +50,26 @@ impl Contexts {
             source_model.push_context_with_weights(no_event_runlength_weights());
 
         Self {
-            d_context,
+            d_initial_context,
+            d_stable_context,
+            d_inc_context,
+            d_dec_context,
             t_context,
             t_residual_max,
             eof_context,
             bitshift_context,
             no_event_run_length_context,
+        }
+    }
+
+    /// Get the D residual context based on the trend of previous D residuals, defaulting to stable
+    pub(crate) fn d_trend_context(&self, last_d_residual: Option<DResidual>) -> usize {
+        const THRESHOLD: DResidual = 3;
+        match last_d_residual {
+            Some(d) if d == DRESIDUAL_NO_EVENT => self.d_stable_context,
+            Some(d) if d > THRESHOLD => self.d_inc_context,
+            Some(d) if d < -THRESHOLD => self.d_dec_context,
+            _ => self.d_stable_context,
         }
     }
 
@@ -256,6 +277,108 @@ pub fn no_event_runlength_weights() -> Weights {
     }
 
     Weights::new_with_counts(counts.len(), &counts)
+}
+
+pub fn d_residual_stable_weights() -> Weights {
+    // When trend is stable, expect residuals very close to 0
+    // Span the range [-255, 257]
+    let mut counts: [u64; 513] = [1; 513];
+
+    for (i, count) in counts.iter_mut().enumerate() {
+        match i {
+            // [-3, 3] - very high probability for near-zero residuals
+            252..=258 => *count = 50,
+
+            // [-10, 10] - high probability
+            245..=265 => *count = 25,
+
+            // [-20, 20] - moderate probability
+            235..=275 => *count = 10,
+
+            // [-30, 30] - lower probability
+            225..=285 => *count = 5,
+
+            // NO_EVENT is rare due to RLE - only appears when starting a run
+            511 => *count = 3,
+
+            // give moderate probability to skip cube
+            512 => *count = 10,
+
+            _ => {}
+        }
+    }
+
+    Weights::new_with_counts(counts.len(), &Vec::from(counts))
+}
+
+pub fn d_residual_inc_weights() -> Weights {
+    // When trend is increasing, expect positive residuals
+    // Span the range [-255, 257]
+    let mut counts: [u64; 513] = [1; 513];
+
+    for (i, count) in counts.iter_mut().enumerate() {
+        match i {
+            // [0, 10] - very high probability for small positive residuals
+            255..=265 => *count = 50,
+
+            // [11, 30] - high probability for moderate positive residuals
+            266..=285 => *count = 30,
+
+            // [31, 50] - moderate probability
+            286..=305 => *count = 15,
+
+            // [51, 100] - lower probability
+            306..=355 => *count = 8,
+
+            // [-10, -1] - lower probability for small negative (trend reversal)
+            245..=254 => *count = 5,
+
+            // NO_EVENT is rare due to RLE
+            511 => *count = 2,
+
+            // give low probability to skip cube
+            512 => *count = 5,
+
+            _ => {}
+        }
+    }
+
+    Weights::new_with_counts(counts.len(), &Vec::from(counts))
+}
+
+pub fn d_residual_dec_weights() -> Weights {
+    // When trend is decreasing, expect negative residuals
+    // Span the range [-255, 257]
+    let mut counts: [u64; 513] = [1; 513];
+
+    for (i, count) in counts.iter_mut().enumerate() {
+        match i {
+            // [-10, 0] - very high probability for small negative residuals
+            245..=255 => *count = 50,
+
+            // [-30, -11] - high probability for moderate negative residuals
+            225..=244 => *count = 30,
+
+            // [-50, -31] - moderate probability
+            205..=224 => *count = 15,
+
+            // [-100, -51] - lower probability
+            155..=204 => *count = 8,
+
+            // [1, 10] - lower probability for small positive (trend reversal)
+            256..=265 => *count = 5,
+
+            // NO_EVENT is rare due to RLE
+            511 => *count = 2,
+
+            // give low probability to skip cube
+            512 => *count = 5,
+
+            _ => {}
+        }
+    }
+
+    Weights::new_with_counts(counts.len(), &Vec::from(counts))
 }
 
 pub fn eof_context(
