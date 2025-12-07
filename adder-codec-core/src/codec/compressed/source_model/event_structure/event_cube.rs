@@ -73,6 +73,22 @@ impl DeltaTHistoryBuffer {
                 }
                 Some((weighted_sum / weight_sum) as DeltaT)
             }
+            PredictionStrategy::ExponentialWeighted => {
+                // Exponential decay: much stronger recency bias
+                // Weight = 2^(count - i - 1), so most recent gets 2^(count-1), oldest gets 2^0 = 1
+                let mut weighted_sum = 0u64;
+                let mut weight_sum = 0u64;
+                for i in 0..self.count {
+                    let idx = (self.write_idx + HISTORY_SIZE - 1 - i) % HISTORY_SIZE;
+                    // Use bit shifting for power of 2: 1 << n = 2^n
+                    // Cap the exponent to avoid overflow (max shift of 31 for u64 weights)
+                    let exponent = (self.count - i - 1).min(31);
+                    let weight = 1u64 << exponent;
+                    weighted_sum += self.buffer[idx] as u64 * weight;
+                    weight_sum += weight;
+                }
+                Some((weighted_sum / weight_sum) as DeltaT)
+            }
             PredictionStrategy::Median => {
                 // Median - robust to outliers
                 let mut sorted = [0u32; HISTORY_SIZE];
@@ -97,9 +113,15 @@ impl DeltaTHistoryBuffer {
 /// Prediction strategies for delta_t estimation
 #[derive(Copy, Clone, Debug)]
 enum PredictionStrategy {
+    /// Use the most recent delta_t value (current implementation)
     Last,
+    /// Simple average of all history
     Mean,
+    /// Weighted average with more weight to recent values (linear decay)
     WeightedMean,
+    /// Exponential weighted average - strongest recency bias
+    ExponentialWeighted,
+    /// Median value - robust to outliers
     Median,
 }
 
@@ -215,7 +237,7 @@ fn generate_t_prediction_cached(
     if idx == 1 {
         // First event - use history or fallback to dt_ref
         let predicted_delta = delta_t_history
-            .predict(PredictionStrategy::WeightedMean)
+            .predict(PredictionStrategy::ExponentialWeighted)
             .unwrap_or(dt_ref);
         start_t + predicted_delta as AbsoluteT
     } else {
@@ -226,9 +248,9 @@ fn generate_t_prediction_cached(
             d_residual = -1;
         }
 
-        // Use history-based prediction instead of just last_delta_t
+        // Use exponential weighted prediction for stronger recency bias
         let base_prediction = delta_t_history
-            .predict(PredictionStrategy::WeightedMean)
+            .predict(PredictionStrategy::ExponentialWeighted)
             .unwrap_or(dt_ref);
 
         // Apply d_residual scaling to the predicted value
