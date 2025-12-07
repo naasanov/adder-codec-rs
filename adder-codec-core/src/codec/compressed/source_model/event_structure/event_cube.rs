@@ -19,7 +19,8 @@ type Pixel = Vec<EventCoordless>;
 type EventLists = [[[Pixel; BLOCK_SIZE]; BLOCK_SIZE]; 3];
 
 /// History buffer size for delta_t caching
-const HISTORY_SIZE: usize = 8;
+/// Tuned to 4 for optimal compression - balances recency vs. context
+const HISTORY_SIZE: usize = 4;
 
 /// Circular buffer to maintain recent delta_t values for adaptive temporal prediction
 #[derive(Clone, Debug, PartialEq, Copy)]
@@ -107,6 +108,58 @@ impl DeltaTHistoryBuffer {
         self.buffer[self.write_idx] = delta_t;
         self.write_idx = (self.write_idx + 1) % HISTORY_SIZE;
         self.count = self.count.saturating_add(1).min(HISTORY_SIZE);
+    }
+
+    /// Calculate variance of the history buffer to determine pattern stability
+    fn variance(&self) -> u64 {
+        if self.count < 2 {
+            return 0;
+        }
+
+        // Calculate mean first
+        let mean = self.predict(PredictionStrategy::Mean).unwrap() as u64;
+
+        // Calculate sum of squared differences
+        let variance_sum: u64 = (0..self.count)
+            .map(|i| {
+                let idx = (self.write_idx + HISTORY_SIZE - 1 - i) % HISTORY_SIZE;
+                let value = self.buffer[idx] as i64;
+                let diff = (value - mean as i64).abs() as u64;
+                diff.saturating_mul(diff) // Squared difference with overflow protection
+            })
+            .sum();
+
+        variance_sum / self.count as u64
+    }
+
+    /// Adaptively select the best prediction strategy based on temporal pattern characteristics
+    fn predict_adaptive(&self) -> Option<DeltaT> {
+        if self.count == 0 {
+            return None;
+        }
+
+        // For very few samples, just use the last value
+        if self.count < 3 {
+            return self.predict(PredictionStrategy::Last);
+        }
+
+        let var = self.variance();
+
+        // Thresholds tuned for event camera delta_t patterns:
+        // - Low variance (< 1000): Very stable/periodic patterns → Mean works well
+        // - Medium variance (1000-10000): Trending patterns → ExponentialWeighted for recency
+        // - High variance (> 10000): Noisy/irregular patterns → Median for robustness
+
+        if var < 1000 {
+            // Stable pattern: simple mean is sufficient and efficient
+            self.predict(PredictionStrategy::Mean)
+        } else if var < 10000 {
+            // Moderate variability: exponential weighting captures recent trends
+            self.predict(PredictionStrategy::ExponentialWeighted)
+        } else {
+            // High variability: median is robust to outliers
+            self.predict(PredictionStrategy::Median)
+        }
     }
 }
 
@@ -235,9 +288,9 @@ fn generate_t_prediction_cached(
     start_t: AbsoluteT,
 ) -> AbsoluteT {
     if idx == 1 {
-        // First event - use history or fallback to dt_ref
+        // First event - use adaptive prediction based on pattern characteristics
         let predicted_delta = delta_t_history
-            .predict(PredictionStrategy::ExponentialWeighted)
+            .predict_adaptive()
             .unwrap_or(dt_ref);
         start_t + predicted_delta as AbsoluteT
     } else {
@@ -248,9 +301,9 @@ fn generate_t_prediction_cached(
             d_residual = -1;
         }
 
-        // Use exponential weighted prediction for stronger recency bias
+        // Use adaptive prediction: automatically selects best strategy based on variance
         let base_prediction = delta_t_history
-            .predict(PredictionStrategy::ExponentialWeighted)
+            .predict_adaptive()
             .unwrap_or(dt_ref);
 
         // Apply d_residual scaling to the predicted value
