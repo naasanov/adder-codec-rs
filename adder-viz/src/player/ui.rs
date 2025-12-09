@@ -285,6 +285,35 @@ impl VizUi for PlayerUi {
             while self.image_rx.try_recv().is_ok() {} // Drain the image channel
         }
 
+        // File picker for input
+        ui.label("Input file:");
+        ui.horizontal(|ui| {
+            let input_label = match &core_params.input_path_buf_0 {
+                Some(path) => path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("(selected)")
+                    .to_string(),
+                None => "No file selected".to_string(),
+            };
+
+            if ui.button(input_label).clicked() {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("ADΔER files", &["adder", "addr"])
+                    .pick_file()
+                {
+                    core_params.input_path_buf_0 = Some(path);
+                }
+            }
+
+            if core_params.input_path_buf_0.is_some() {
+                if ui.button("✖").clicked() {
+                    core_params.input_path_buf_0 = None;
+                }
+            }
+        });
+        ui.end_row();
+
         ui.add_enabled(true, egui::Label::new("Playback controls:"));
         ui.horizontal(|ui| {
             if !self.paused.load(Ordering::Relaxed) {
