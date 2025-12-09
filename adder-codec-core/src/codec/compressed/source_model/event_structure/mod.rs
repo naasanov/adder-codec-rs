@@ -4,5 +4,8 @@ pub mod event_adu;
 /// An `EventCube` has many compressed events
 mod event_cube;
 
+#[cfg(test)]
+mod test_failing_cube;
+
 /// Width and height (same number) of a block
 pub const BLOCK_SIZE: usize = 16;

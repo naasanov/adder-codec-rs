@@ -1,0 +1,40 @@
+{
+  // Rust Analyzer configuration optimized for compression work
+
+  // Only check the crates you're working on
+  "rust-analyzer.linkedProjects": [
+    "./adder-codec-core/Cargo.toml",
+    "./adder-viz/Cargo.toml"
+  ],
+
+  // Enable only compression-related features to speed up analysis
+  "rust-analyzer.cargo.features": [
+    "compression"
+  ],
+
+  // Don't build/check binaries you're not using
+  "rust-analyzer.cargo.buildScripts.enable": true,
+
+  // Use clippy for better linting
+  "rust-analyzer.check.command": "clippy",
+  "rust-analyzer.check.extraArgs": [
+    "--package", "adder-codec-core",
+    "--package", "adder-viz"
+  ],
+
+  // Proc macro support (for enum_dispatch, seq-macro, etc.)
+  "rust-analyzer.procMacro.enable": true,
+  "rust-analyzer.procMacro.attributes.enable": true,
+
+  // Helpful type hints for complex types
+  "rust-analyzer.inlayHints.typeHints.enable": true,
+  "rust-analyzer.inlayHints.parameterHints.enable": true,
+
+  // Faster builds by not checking tests unless needed
+  "rust-analyzer.cargo.allTargets": false,
+
+  // Increase stack size if you hit issues with complex code
+  "rust-analyzer.server.extraEnv": {
+    "RUST_MIN_STACK": "8388608"
+  }
+}

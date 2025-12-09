@@ -33,7 +33,7 @@ pub struct MyArgs {
     #[clap(long, default_value_t = 8)]
     pub thread_count: u8,
 
-    #[clap(short, long, action)]
+    #[clap(long, action)]
     pub features: bool,
 
     /// Frames per second to derive the video from the adder events

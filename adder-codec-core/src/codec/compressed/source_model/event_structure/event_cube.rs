@@ -328,111 +328,128 @@ impl ComponentCompression for EventCube {
         let mut d_residual = 0;
         let mut no_event_run = 0u16;
 
+        println!(
+            "Compressing Intra Cube at t={}, start_x={}, start_y={}",
+            self.start_t, self.start_x, self.start_y
+        );
+
         // Intra-code the first event (if present) for each pixel in row-major order
         for c in 0..self.num_channels {
-            self.raw_event_lists[c].iter_mut().enumerate().for_each(|(y, row)| {
-                row.iter_mut().enumerate().for_each(|(x, pixel)| {
-                    if pixel.is_empty() {
-                        // println!("[ENCODE] [{}][{}][{}] EMPTY - incrementing no_event_run to {}", c, y, x, no_event_run + 1);
-                        no_event_run += 1;
-                        return;
-                    }
+            self.raw_event_lists[c]
+                .iter_mut()
+                .enumerate()
+                .for_each(|(y, row)| {
+                    row.iter_mut().enumerate().for_each(|(x, pixel)| {
+                        if pixel.is_empty() {
+                            print!(".");
+                            no_event_run += 1;
+                            return;
+                        }
 
-                    // If we had a run of NO_EVENTs, encode the run length first
-                    if no_event_run > 0 {
-                        // println!("[ENCODE] [{}][{}][{}] Writing NO_EVENT with run_length={}", c, y, x, no_event_run);
+                        // If we had a run of NO_EVENTs, encode the run length first
+                        if no_event_run > 0 {
+                            println!(
+                                "[ENCODE] [{}][{}][{}] Writing NO_EVENT with run_length={}",
+                                c, y, x, no_event_run
+                            );
+                            encoder.model.set_context(contexts.d_context);
+                            let tmp = (DRESIDUAL_NO_EVENT + D_RESIDUAL_OFFSET) as usize;
+                            encoder.encode(Some(&tmp), stream).unwrap();
+
+                            // Encode run length
+                            encoder
+                                .model
+                                .set_context(contexts.no_event_run_length_context);
+                            encoder
+                                .encode(Some(&(no_event_run as usize)), stream)
+                                .unwrap();
+
+                            no_event_run = 0;
+                        }
+
                         encoder.model.set_context(contexts.d_context);
-                        let tmp = (DRESIDUAL_NO_EVENT + D_RESIDUAL_OFFSET) as usize;
-                        encoder.encode(Some(&tmp), stream).unwrap();
-                        
-                        // Encode run length
-                        encoder
-                        .model
-                            .set_context(contexts.no_event_run_length_context);
-                        encoder
-                        .encode(Some(&(no_event_run as usize)), stream)
-                        .unwrap();
 
-                        no_event_run = 0;
-                    }
+                        let event = pixel.first_mut().unwrap();
 
-                    encoder.model.set_context(contexts.d_context);
+                        if let Some(init) = &mut init_event {
+                            d_residual = event.d as DResidual - init.d as DResidual;
+                            // Write the D residual (relative to the start_d for the first event)
 
-                    let event = pixel.first_mut().unwrap();
-                    // println!("[ENCODE] [{}][{}][{}] Writing EVENT d={}, t={}", c, y, x, event.d, event.t);
-
-                    if let Some(init) = &mut init_event {
-                        d_residual = event.d as DResidual - init.d as DResidual;
-                        // Write the D residual (relative to the start_d for the first event)
-
-                        let tmp = (d_residual + D_RESIDUAL_OFFSET) as usize;
-                        encoder.encode(Some(&tmp), stream).unwrap();
-                        //     for byte in d_residual.to_be_bytes().iter() {
-                        //     encoder.encode(Some(&(*byte as usize)), stream).unwrap();
-                        // }
-                    } else {
-                        // Write the first event's D directly
-                        let tmp = (event.d as DResidual + D_RESIDUAL_OFFSET) as usize;
-                        encoder.encode(Some(&tmp), stream).unwrap();
-                        // for byte in (event.d as DResidual).to_be_bytes().iter() {
-                        //     encoder.encode(Some(&(*byte as usize)), stream).unwrap();
-                        // }
-
-                        // Create the init event with t being the start_t of the cube
-                        init_event = Some(EventCoordless {
-                            d: event.d,
-                            t: self.start_t,
-                        })
-                    }
-
-                    if let Some(init) = &mut init_event {
-                        // Don't do any special prediction here (yet). Just predict the same t as previously found.
-                        let t_residual_i64 = event.t as i64 - init.t as i64;
-                        let (bitshift_amt, t_residual) =
-                            contexts.residual_to_bitshift(t_residual_i64);
-                        // contexts.residual_to_bitshift2(
-                        //     init.t as i64,
-                        //     t_residual_i64,
-                        //     event,
-                        //     init,
-                        //     self.dt_ref
-                        // );
-
-                        encoder.model.set_context(contexts.bitshift_context);
-                        for byte in bitshift_amt.to_be_bytes().iter() {
-                            encoder.encode(Some(&(*byte as usize)), stream).unwrap();
-                        }
-
-                        encoder.model.set_context(contexts.t_context);
-
-                        if bitshift_amt == BITSHIFT_ENCODE_FULL {
-                            for byte in t_residual.to_be_bytes().iter() {
-                                encoder.encode(Some(&(*byte as usize)), stream).unwrap();
-                            }
-                            event.t = (init.t as i64 + t_residual) as AbsoluteT;
+                            let tmp = (d_residual + D_RESIDUAL_OFFSET) as usize;
+                            encoder.encode(Some(&tmp), stream).unwrap();
+                            //     for byte in d_residual.to_be_bytes().iter() {
+                            //     encoder.encode(Some(&(*byte as usize)), stream).unwrap();
+                            // }
                         } else {
-                            let t_residual = t_residual as TResidual;
-                            for byte in t_residual.to_be_bytes().iter() {
+                            // Write the first event's D directly
+                            let tmp = (event.d as DResidual + D_RESIDUAL_OFFSET) as usize;
+                            encoder.encode(Some(&tmp), stream).unwrap();
+                            // for byte in (event.d as DResidual).to_be_bytes().iter() {
+                            //     encoder.encode(Some(&(*byte as usize)), stream).unwrap();
+                            // }
+
+                            // Create the init event with t being the start_t of the cube
+                            init_event = Some(EventCoordless {
+                                d: event.d,
+                                t: self.start_t,
+                            });
+                        }
+
+                        if let Some(init) = &mut init_event {
+                            // Don't do any special prediction here (yet). Just predict the same t as previously found.
+                            let t_residual_i64 = event.t as i64 - init.t as i64;
+                            let (bitshift_amt, t_residual) =
+                                contexts.residual_to_bitshift(t_residual_i64);
+                            // contexts.residual_to_bitshift2(
+                            //     init.t as i64,
+                            //     t_residual_i64,
+                            //     event,
+                            //     init,
+                            //     self.dt_ref
+                            // );
+
+                            encoder.model.set_context(contexts.bitshift_context);
+                            for byte in bitshift_amt.to_be_bytes().iter() {
                                 encoder.encode(Some(&(*byte as usize)), stream).unwrap();
                             }
-                            // Shift it back for the event, so we base our next prediction on the reconstructed value!
-                            // if bitshift_amt != 0 {
-                            event.t = (init.t as i64 + ((t_residual as i64) << bitshift_amt as i64))
-                                as AbsoluteT;
-                        }
-                        debug_assert!(event.t < 2_u32.pow(31));
 
-                        *init = *event;
-                    } else {
-                        panic!("No init event");
-                    }
+                            encoder.model.set_context(contexts.t_context);
+
+                            if bitshift_amt == BITSHIFT_ENCODE_FULL {
+                                for byte in t_residual.to_be_bytes().iter() {
+                                    encoder.encode(Some(&(*byte as usize)), stream).unwrap();
+                                }
+                                event.t = (init.t as i64 + t_residual) as AbsoluteT;
+                            } else {
+                                let t_residual = t_residual as TResidual;
+                                for byte in t_residual.to_be_bytes().iter() {
+                                    encoder.encode(Some(&(*byte as usize)), stream).unwrap();
+                                }
+                                // Shift it back for the event, so we base our next prediction on the reconstructed value!
+                                // if bitshift_amt != 0 {
+                                event.t = (init.t as i64
+                                    + ((t_residual as i64) << bitshift_amt as i64))
+                                    as AbsoluteT;
+                            }
+                            *init = *event;
+
+                            // println!(
+                            //     "[ENCODE] [{}][{}][{}] Writing EVENT d={}, t={}, d_res={}, t_res={}",
+                            //     c, y, x, event.d, event.t, d_residual, t_residual
+                            // );
+                        } else {
+                            panic!("No init event");
+                        }
+                    })
                 })
-            })
         }
 
         // Handle trailing NO_EVENT run
         if no_event_run > 0 {
-            // println!("[ENCODE] TRAILING Writing NO_EVENT with run_length={}", no_event_run);
+            println!(
+                "[ENCODE] TRAILING Writing NO_EVENT with run_length={}",
+                no_event_run
+            );
             encoder.model.set_context(contexts.d_context);
             let tmp = (DRESIDUAL_NO_EVENT + D_RESIDUAL_OFFSET) as usize;
             encoder.encode(Some(&tmp), stream).unwrap();
@@ -555,6 +572,10 @@ impl ComponentCompression for EventCube {
         stream: &mut BitReader<Cursor<Vec<u8>>, BigEndian>,
         start_t: AbsoluteT,
     ) {
+        println!(
+            "Decompressing Intra Cube at t={}, start_x={}, start_y={}",
+            start_t, self.start_x, self.start_y
+        );
         let mut bitshift_buffer = [0u8; 1];
         let mut t_residual_buffer = [0u8; size_of::<TResidual>()];
         let mut t_residual_full_buffer = [0u8; size_of::<i64>()];
@@ -566,7 +587,7 @@ impl ComponentCompression for EventCube {
                 for x in 0..BLOCK_SIZE {
                     if pixels_to_skip > 0 {
                         // Skip this pixel due to Run Length Encoding
-                        // println!("[DECODE] [{}][{}][{}] SKIPPING (pixels_to_skip={})", c, y, x, pixels_to_skip);
+                        print!(".");
                         pixels_to_skip -= 1;
                         self.raw_event_lists[c][y][x].clear();
                         continue;
@@ -578,7 +599,10 @@ impl ComponentCompression for EventCube {
 
                     let tmp = decoder.decode(stream).unwrap().unwrap();
                     let d_residual = tmp as i16 - D_RESIDUAL_OFFSET;
-                    // println!("[DECODE] [{}][{}][{}] Read d_residual={}", c, y, x, d_residual);
+                    // println!(
+                    //     "[DECODE] [{}][{}][{}] Read d_residual={}",
+                    //     c, y, x, d_residual
+                    // );
 
                     if d_residual == DRESIDUAL_SKIP_CUBE {
                         pixel.clear(); // So we can skip it for intra-coding
@@ -586,9 +610,11 @@ impl ComponentCompression for EventCube {
                         return;
                     } else if d_residual == DRESIDUAL_NO_EVENT {
                         // Decode run length
-                        decoder.model.set_context(contexts.no_event_run_length_context);
+                        decoder
+                            .model
+                            .set_context(contexts.no_event_run_length_context);
                         let run_length = decoder.decode(stream).unwrap().unwrap() as u16;
-                        // println!("[DECODE] [{}][{}][{}] Read NO_EVENT with run_length={}, setting pixels_to_skip={}", c, y, x, run_length, run_length.saturating_sub(1));
+                        println!("[DECODE] [{}][{}][{}] Read NO_EVENT with run_length={}, setting pixels_to_skip={}", c, y, x, run_length, run_length.saturating_sub(1));
                         pixels_to_skip = run_length.saturating_sub(1); // -1 because current pixel is part of the run
                         pixel.clear();
                         continue; // Skip to next pixel, don't decode event data
@@ -737,9 +763,11 @@ impl ComponentCompression for EventCube {
 mod compression_tests {
     use crate::codec::compressed::fenwick::context_switching::FenwickModel;
     use crate::codec::compressed::source_model::cabac_contexts::eof_context;
+    use crate::codec::compressed::source_model::event_structure::event_adu::EventAdu;
     use crate::codec::compressed::source_model::event_structure::event_cube::EventCube;
     use crate::codec::compressed::source_model::{ComponentCompression, HandleEvent};
-    use crate::{Coord, Event};
+    use crate::codec::CodecError;
+    use crate::{Coord, Event, PlaneSize};
     use arithmetic_coding_adder_dep::Encoder;
     use bitstream_io::{BigEndian, BitReader, BitWriter};
     use rand::prelude::StdRng;
@@ -747,6 +775,224 @@ mod compression_tests {
     use std::cmp::min;
     use std::error::Error;
     use std::io::Cursor;
+
+    #[test]
+    fn test_adu_compress_decompress_sync() -> Result<(), Box<dyn Error>> {
+        let plane = PlaneSize::new(32, 32, 1)?;
+        let start_t = 0;
+        let dt_ref = 255;
+        let num_intervals = 10;
+
+        let mut adu = EventAdu::new(plane, start_t, dt_ref, num_intervals);
+
+        // Ingest a controlled set of events
+        let mut original_events = Vec::new();
+        for y in 0..32 {
+            for x in 0..32 {
+                let event = Event {
+                    coord: Coord { x, y, c: None },
+                    t: start_t + (y * 32 + x) as u32 * 10,
+                    d: 9,
+                };
+                original_events.push(event);
+                adu.ingest_event(event);
+            }
+        }
+
+        // Compress directly (no threading)
+        let mut stream = BitWriter::endian(Vec::new(), BigEndian);
+        adu.compress(&mut stream, 7)?;
+        let compressed = stream.into_writer();
+
+        // Decompress directly
+        let mut stream = BitReader::endian(Cursor::new(compressed), BigEndian);
+        let mut adu2 = EventAdu::new(plane, start_t, dt_ref, num_intervals);
+        adu2.decompress(&mut stream);
+
+        // Extract and compare events
+        let mut decoded_events = Vec::new();
+        loop {
+            match adu2.digest_event() {
+                Ok(event) => decoded_events.push(event),
+                Err(CodecError::NoMoreEvents) => break,
+                Err(e) => return Err(Box::new(e)),
+            }
+        }
+
+        assert_eq!(original_events.len(), decoded_events.len());
+        // Compare events with tolerance for quantization
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_adu_compress_decompress_from_file() -> Result<(), Box<dyn Error>> {
+        use crate::open_file_decoder;
+
+        // Read events from the actual file
+        let (mut stream, mut bitreader) =
+            open_file_decoder("tests/samples/virat_small_gray.adder")?;
+        stream.meta_mut().adu_interval =
+            (stream.meta().delta_t_max / stream.meta().ref_interval) as usize;
+
+        let meta = *stream.meta();
+
+        // Read ALL events from the file to test the failing scenario
+        let mut all_events = Vec::new();
+        loop {
+            let res = stream.digest_event(&mut bitreader);
+            match res {
+                Ok(event) => {
+                    all_events.push(event);
+                }
+                Err(crate::codec::CodecError::IoError(_)) => break,
+                Err(e) => return Err(Box::new(e)),
+            }
+        }
+
+        println!("Read {} total events from file", all_events.len());
+
+        // Group events by ADU
+        let adu_time_span = meta.ref_interval * meta.adu_interval as u32;
+        let mut adus: Vec<Vec<Event>> = vec![];
+        let mut current_adu_events = Vec::new();
+        let mut current_adu_start_t = 0u32;
+
+        for event in all_events.iter() {
+            let event_adu_index = event.t / adu_time_span;
+            let event_adu_start_t = event_adu_index * adu_time_span;
+
+            if event_adu_start_t != current_adu_start_t {
+                if !current_adu_events.is_empty() {
+                    adus.push(current_adu_events);
+                }
+                current_adu_events = Vec::new();
+                current_adu_start_t = event_adu_start_t;
+            }
+            current_adu_events.push(*event);
+        }
+        if !current_adu_events.is_empty() {
+            adus.push(current_adu_events);
+        }
+
+        println!("Found {} ADUs", adus.len());
+        for (i, adu_events) in adus.iter().enumerate().take(5) {
+            println!(
+                "  ADU {}: {} events, t range [{}, {}]",
+                i,
+                adu_events.len(),
+                adu_events.first().map(|e| e.t).unwrap_or(0),
+                adu_events.last().map(|e| e.t).unwrap_or(0)
+            );
+        }
+
+        // Test the FIRST ADU (which fails in the roundtrip test)
+        let original_events = &adus[0];
+        let mut adu = EventAdu::new(meta.plane, 0, meta.ref_interval, meta.adu_interval);
+
+        for event in original_events {
+            adu.ingest_event(*event);
+        }
+
+        println!("Read {} events from file", original_events.len());
+        println!("First 5 original events:");
+        for (i, event) in original_events.iter().take(5).enumerate() {
+            let x = event.coord.x;
+            let y = event.coord.y;
+            let d = event.d;
+            let t = event.t;
+            println!("  [{}] x={}, y={}, d={}, t={}", i, x, y, d, t);
+        }
+
+        // Compress directly (no threading)
+        let mut stream = BitWriter::endian(Vec::new(), BigEndian);
+        adu.compress(&mut stream, 7)?;
+        let compressed = stream.into_writer();
+
+        println!("Compressed to {} bytes", compressed.len());
+
+        // Decompress directly
+        let mut stream = BitReader::endian(Cursor::new(compressed), BigEndian);
+        let mut adu2 = EventAdu::new(meta.plane, 0, meta.ref_interval, meta.adu_interval);
+        adu2.decompress(&mut stream);
+
+        // Extract and compare events
+        let mut decoded_events = Vec::new();
+        loop {
+            match adu2.digest_event() {
+                Ok(event) => decoded_events.push(event),
+                Err(CodecError::NoMoreEvents) => break,
+                Err(e) => return Err(Box::new(e)),
+            }
+        }
+
+        println!("Decoded {} events", decoded_events.len());
+        println!("First 5 decoded events:");
+        for (i, event) in decoded_events.iter().take(5).enumerate() {
+            let x = event.coord.x;
+            let y = event.coord.y;
+            let d = event.d;
+            let t = event.t;
+            println!("  [{}] x={}, y={}, d={}, t={}", i, x, y, d, t);
+        }
+
+        assert_eq!(
+            original_events.len(),
+            decoded_events.len(),
+            "Event count mismatch"
+        );
+
+        // Sort both lists by coordinates for comparison (digest_event returns in spatial order)
+        let mut original_sorted = original_events.clone();
+        let mut decoded_sorted = decoded_events.clone();
+
+        let cmp_fn = |a: &Event, b: &Event| {
+            let a_c = a.coord.c.unwrap_or(0);
+            let b_c = b.coord.c.unwrap_or(0);
+            (a_c, a.coord.y, a.coord.x).cmp(&(b_c, b.coord.y, b.coord.x))
+        };
+
+        original_sorted.sort_by(cmp_fn);
+        decoded_sorted.sort_by(cmp_fn);
+
+        // Compare events with tolerance for quantization
+        for (i, (orig, dec)) in original_sorted
+            .iter()
+            .zip(decoded_sorted.iter())
+            .enumerate()
+        {
+            // Unpack fields to avoid packed struct reference issues
+            let orig_x = orig.coord.x;
+            let orig_y = orig.coord.y;
+            let orig_c = orig.coord.c;
+            let orig_d = orig.d;
+            let orig_t = orig.t;
+
+            let dec_x = dec.coord.x;
+            let dec_y = dec.coord.y;
+            let dec_c = dec.coord.c;
+            let dec_d = dec.d;
+            let dec_t = dec.t;
+
+            assert_eq!(orig_x, dec_x, "Event {} coord.x mismatch", i);
+            assert_eq!(orig_y, dec_y, "Event {} coord.y mismatch", i);
+            assert_eq!(orig_c, dec_c, "Event {} coord.c mismatch", i);
+            assert_eq!(orig_d, dec_d, "Event {} d mismatch", i);
+
+            // Allow some tolerance for timestamp due to quantization
+            let t_diff = (orig_t as i64 - dec_t as i64).abs();
+            assert!(
+                t_diff <= 100,
+                "Event {} t mismatch: orig={}, dec={}, diff={}",
+                i,
+                orig_t,
+                dec_t,
+                t_diff
+            );
+        }
+
+        Ok(())
+    }
 
     #[test]
     fn compress_and_decompress_intra() -> Result<(), Box<dyn Error>> {

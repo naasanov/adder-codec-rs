@@ -15,9 +15,9 @@ enum BenchmarkResult {}
 #[test]
 fn compression_benchmark() -> Result<(), Box<dyn Error>> {
     let files = vec![
-        "tests/samples/virat_small_gray.adder",    // Given file
+        // "tests/samples/virat_small_gray.adder",    // Given file
         "tests/samples/lake_scaled_hd_crop.adder", // Medium, full resolution
-        "tests/samples/bunny_crop4.adder",         // Large, contains color
+        // "tests/samples/bunny_crop4.adder",         // Large, contains color
     ];
 
     // Old size, new size

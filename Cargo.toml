@@ -39,7 +39,4 @@ opt-level = 0
 [profile.test.package."*"]
 opt-level = 0
 
-[build]
-rustflags = ["-Z", "threads=8"]
-
 
